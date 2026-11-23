@@ -1,6 +1,7 @@
 import { RANKS, HANDS, POSITIONS, ACTIONS, BASE_PROFILE, COMBOS, frequencies, availableScenarios, makeQuestion, dealCards, grade, rangeSummary, recordAttempt, validateProfile, exportProfile, explanation, openSize, raiseSize, callAmount, potSize, canCall, canRaise, isPushFold, builtinProfile } from './engine.js';
 import { PUBLIC_PROFILES, DEFAULT_PUBLIC_PROFILE, PUBLIC_SOURCE } from './public-ranges.js';
 import { readState, writeState, STORAGE_KEY } from './storage.js';
+import { createLimpTrainer } from './limp-training.js';
 
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
@@ -22,6 +23,7 @@ let local;
 try { local = window.localStorage; } catch { local = { getItem() { throw new Error('Unavailable'); }, setItem() { throw new Error('Unavailable'); } }; }
 const saved = readState(local);
 const state = { ...saved, page: 'train', question: null, result: null, revealed: false, guided: false, hint: false, inspected: null, review: null, round: 1, notebookTable: 'all', notebookStatus: 'active', modal: null, saveEnabled: !saved.warning };
+const limp = createLimpTrainer({ storage: local, onChange: render, onToast: toast, onNavigate: page => { state.page = page; render(); }, download });
 const profile = (id = state.settings.profileId) => builtinProfile(id) || state.profiles.find(p => p.id === id) || BASE_PROFILE;
 const activeProfile = () => profile(state.question?.profileId);
 const unanswered = () => state.question && !state.result && !state.revealed;
@@ -76,12 +78,13 @@ function stats() {
   return { total: attempts.length, accuracy: attempts.length ? Math.round(correct / attempts.length * 100) : null, wrong: state.progress.mistakes.filter(m => !m.mastered).length };
 }
 function header() {
-  const s = stats();
+  const s = stats(); s.wrong += limp.wrongCount();
   return `<header class="topbar"><a class="brand" href="#" data-do="nav" data-page="train" aria-label="Preflop Lab 训练室"><span class="brand-mark">♠</span><span>PREFLOP<span class="brand-light"> LAB</span><small>把好决策，练成直觉。</small></span></a>
-    <nav aria-label="主要导航">${[['train', 'train', '训练室'], ['range', 'grid', '范围库'], ['mistakes', 'book', '错题本']].map(([page, glyph, label]) => `<button class="nav-item ${state.page === page ? 'active' : ''}" data-do="nav" data-page="${page}" ${state.page === page ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span>${page === 'mistakes' && s.wrong ? `<span class="nav-count">${s.wrong}</span>` : ''}</button>`).join('')}</nav>
+    <nav aria-label="主要导航">${[['train', 'train', '训练室'], ['limp', 'tune', 'Limp 专项'], ['range', 'grid', '范围库'], ['mistakes', 'book', '错题本']].map(([page, glyph, label]) => `<button class="nav-item ${state.page === page ? 'active' : ''}" data-do="nav" data-page="${page}" ${state.page === page ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span>${page === 'mistakes' && s.wrong ? `<span class="nav-count">${s.wrong}</span>` : ''}</button>`).join('')}</nav>
     <button class="help-button" data-do="help" aria-label="训练指南">${icon('info')}<span>训练指南</span></button></header>`;
 }
 function config() {
+  if (state.page === 'limp') return limp.config();
   const p = profile(), options = availableScenarios({ ...state.settings, position: 'random' }, p);
   const positions = POSITIONS[state.settings.table].filter(pos => options.some(s => s.hero === pos));
   return `<aside class="sidebar"><div class="section-label">${icon('tune')}训练设置</div><label class="field-label">桌型 <span>TABLE SIZE</span></label>
@@ -167,7 +170,7 @@ function rangeView() {
 function filteredMistakes() { return state.progress.mistakes.filter(m => (state.notebookTable === 'all' || m.question.table === Number(state.notebookTable)) && (state.notebookStatus === 'all' || (state.notebookStatus === 'mastered' ? m.mastered : !m.mastered))); }
 function notebook() {
   const list = filteredMistakes(), total = state.progress.mistakes.length, mastered = state.progress.mistakes.filter(m => m.mastered).length;
-  return `<section class="notebook panel"><div class="notebook-header"><div><span class="eyebrow">LEARN FROM EVERY HAND</span><h2>把错过的，再赢回来。</h2><p>同一场景自动合并，连续答对 3 次复习后标记为已掌握。</p></div><button class="primary-button" data-do="review-all" ${list.filter(m => !m.mastered).length ? '' : 'disabled'}>${icon('train')}开始专项复习</button></div>
+  return `<section class="notebook panel"><div class="notebook-header"><div><span class="eyebrow">LEARN FROM EVERY HAND</span><h2>开池与推弃错题</h2><p>同一场景自动合并，连续答对 3 次复习后标记为已掌握。</p></div><button class="primary-button" data-do="review-all" ${list.filter(m => !m.mastered).length ? '' : 'disabled'}>${icon('train')}开始专项复习</button></div>
     <div class="notebook-summary"><span>全部错题 <strong>${total}</strong></span><span>待巩固 <strong>${total - mastered}</strong></span><span>已掌握 <strong class="mint">${mastered}</strong></span></div>
     <div class="notebook-filters"><div class="filter-tabs">${[['active', '待巩固'], ['mastered', '已掌握'], ['all', '全部']].map(([v, t]) => `<button class="${state.notebookStatus === v ? 'selected' : ''}" data-do="notebook-status" data-value="${v}">${t}</button>`).join('')}</div><div class="select-wrap compact-select"><select aria-label="错题桌型筛选" data-setting="notebookTable">${[['all', '全部桌型'], [6, '6 人桌'], [9, '9 人桌'], [2, '单挑桌']].map(([v, t]) => `<option value="${v}" ${String(state.notebookTable) === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select></div><button class="text-button" data-do="export-progress">${icon('download')}导出记录</button></div>
     ${list.length ? `<div class="mistake-list">${list.map(m => { const q = m.question, f = frequencies(q, q.hand, profile(q.profileId)); return `<article class="mistake-item"><div class="mistake-hand">${q.hand}</div><div class="mistake-description"><strong>${tableName(q.table)} · ${positionName(q.table, q.hero)} <span>${sceneName(q)}</span></strong><p>你的选择：${actionName(m.lastAction, q)}<span class="mistake-answer">范围：${formatStrategy(f, q)}</span></p><small>${esc(profile(q.profileId).name)} · 错误 ${m.misses} 次</small></div><div class="mastery"><div>${[1, 2, 3].map(n => `<i class="${m.successes >= n ? 'done' : ''}"></i>`).join('')}</div><span>${m.mastered ? '已掌握' : `复习 ${m.successes}/3`}</span></div><button class="outline-button" data-do="review-one" data-key="${esc(m.key)}">再练一次</button><button class="icon-button delete-item" data-do="delete-mistake" data-key="${esc(m.key)}" aria-label="删除 ${q.hand} 错题">${icon('close')}</button></article>`; }).join('')}</div>` : `<div class="empty notebook-empty">${icon('book')}<h3>${total ? '这里暂时没有错题' : '让每一次失误都有收获'}</h3><p>${total ? '切换筛选条件，或回到训练室继续练习。' : '独立答题中的错误会自动收录在这里。'}</p><button class="outline-button" data-do="nav" data-page="train">去练几手</button></div>`}</section>`;
@@ -176,7 +179,7 @@ function modal() {
   if (!state.modal) return '';
   let title = '', body = '';
   if (state.modal.type === 'help') {
-    title = '从第一手开始'; body = '<ol class="guide-steps"><li><strong>选择桌型和场景</strong><p>支持单挑、6 人桌、9 人桌，以及率先入池、面对一次开池加注。100BB 为教学近似，非 GTO。公开数据模式为单挑 4–20BB 推弃，只有 SB 全下 / 弃牌和 BB 跟全下 / 弃牌。</p></li><li><strong>独立做出决策</strong><p>选择弃牌、跟注 / limp、加注。看提示、答案或进入范围库后，本题变为不计分的辅助练习。</p></li><li><strong>读懂频率</strong><p>混合策略中，频率大于 0 的行动都算合理。符合范围率衡量行动是否在范围内，不代表 EV 或长期频率执行水平。</p></li><li><strong>回访你的错题</strong><p>错题按范围库、桌型、场景、位置和手牌合并。连续 3 次独立复习正确后自动标记为已掌握。</p></li></ol><div class="keyboard-help"><kbd>F</kbd>弃牌 <kbd>C</kbd>跟注 <kbd>R</kbd>加注 <kbd>空格</kbd>下一手</div>';
+    title = '从第一手开始'; body = '<ol class="guide-steps"><li><strong>选择桌型和场景</strong><p>支持单挑、6 人桌、9 人桌，以及率先入池、面对一次开池加注。100BB 为教学近似，非 GTO。公开数据模式为单挑 4–20BB 推弃，只有 SB 全下 / 弃牌和 BB 跟全下 / 弃牌。Limp 专项另设 BB 面对 SB limp 的过牌与多尺度加注训练：内置单挑 10BB、20BB 原文对照，可自评并收录错题；完整频率导入后可自动判分。</p></li><li><strong>独立做出决策</strong><p>选择弃牌、跟注 / limp、加注。看提示、答案或进入范围库后，本题变为不计分的辅助练习。</p></li><li><strong>读懂频率</strong><p>混合策略中，频率大于 0 的行动都算合理。符合范围率衡量行动是否在范围内，不代表 EV 或长期频率执行水平。</p></li><li><strong>回访你的错题</strong><p>错题按范围库、桌型、场景、位置和手牌合并。连续 3 次独立复习正确后自动标记为已掌握。</p></li></ol><div class="keyboard-help"><kbd>F</kbd>弃牌 <kbd>C</kbd>跟注 <kbd>R</kbd>加注 <kbd>空格</kbd>下一手</div>';
   } else if (state.modal.type === 'method') {
     const p = activeProfile(); title = '范围来源与适用参数';
     body = `<div class="source-badge">${profileLabel(p)}</div><h3>${esc(p.name)}</h3><p>${esc(p.description)}</p>
@@ -194,8 +197,13 @@ function scopeNotice() {
   return `<div class="scope-notice ${p.provenance ? 'public-scope' : ''}"><div><strong>${p.provenance ? '单挑短码推弃 · ' + p.stack + 'BB' : p.id === BASE_PROFILE.id ? '100BB 教学近似，非 GTO' : '用户导入范围'}</strong><span>${p.provenance ? '公开近似 Nash 图表 · 仅全下 / 弃牌；不适用于 100BB 完整翻前。' : p.id === BASE_PROFILE.id ? '单挑、6 人、9 人 100BB 暂无可复用的完整 GTO 数据。' : '导入只验证格式，求解来源与精度未独立核验。'}</span></div><button class="text-button" data-do="${p.provenance ? 'method' : 'public-mode'}">${p.provenance ? '来源与精度' : '体验公开推弃训练'}</button></div>`;
 }
 function render() {
+  if (state.page === 'limp') {
+    $('#app').innerHTML = `${header()}<div class="app-layout">${limp.config()}<main>${limp.render()}<footer><span>PREFLOP LAB / BB vs SB limp</span><span>自评记录与自动判分分别保存</span></footer></main></div>${modal()}`;
+    if (state.modal) $('.modal button')?.focus();
+    return;
+  }
   const title = state.page === 'train' ? '每一次选择，都是优势。' : state.page === 'range' ? '看见范围，理解决策。' : '复盘，是进步的开始。';
-  $('#app').innerHTML = `${header()}${state.warning ? `<div class="storage-warning" role="alert">${esc(state.warning)}<button data-do="backup-raw">导出原始备份</button>${!state.saveEnabled ? '<button data-do="enable-save">启用新记录保存</button>' : ''}</div>` : ''}<div class="app-layout">${config()}<main><div class="page-heading"><div><span class="eyebrow">${state.page === 'train' ? 'YOUR DAILY EDGE' : state.page === 'range' ? 'BUILD YOUR INTUITION' : 'TURN MISTAKES INTO PROGRESS'}</span><h1>${title}</h1><p>${state.page === 'train' ? '从翻前开始，让每一手牌都有依据。' : state.page === 'range' ? '把零散的手牌，连成完整的策略。' : '找到反复出现的偏差，逐个掌握。'}</p></div><div class="mode-badge"><span>♠</span> ${profileLabel(activeProfile())}</div></div>${statStrip()}${scopeNotice()}${state.page === 'train' ? trainer() : state.page === 'range' ? rangeView() : notebook()}<footer><span>PREFLOP LAB <i> / </i> 先思考，再行动。</span><button data-do="method">${profileLabel(activeProfile())} · ${activeProfile().stack}BB · 无前注</button></footer></main></div>${modal()}<input type="file" id="range-upload" accept="application/json,.json" hidden>`;
+  $('#app').innerHTML = `${header()}${state.warning ? `<div class="storage-warning" role="alert">${esc(state.warning)}<button data-do="backup-raw">导出原始备份</button>${!state.saveEnabled ? '<button data-do="enable-save">启用新记录保存</button>' : ''}</div>` : ''}<div class="app-layout">${config()}<main><div class="page-heading"><div><span class="eyebrow">${state.page === 'train' ? 'YOUR DAILY EDGE' : state.page === 'range' ? 'BUILD YOUR INTUITION' : 'TURN MISTAKES INTO PROGRESS'}</span><h1>${title}</h1><p>${state.page === 'train' ? '从翻前开始，让每一手牌都有依据。' : state.page === 'range' ? '把零散的手牌，连成完整的策略。' : '找到反复出现的偏差，逐个掌握。'}</p></div><div class="mode-badge"><span>♠</span> ${profileLabel(activeProfile())}</div></div>${state.page === 'mistakes' ? '' : statStrip() + scopeNotice()}${state.page === 'train' ? trainer() : state.page === 'range' ? rangeView() : limp.notebook() + notebook()}<footer><span>PREFLOP LAB <i> / </i> 先思考，再行动。</span><button data-do="method">${profileLabel(activeProfile())} · ${activeProfile().stack}BB · 无前注</button></footer></main></div>${modal()}<input type="file" id="range-upload" accept="application/json,.json" hidden>`;
   if (state.modal) $('.modal button')?.focus();
 }
 function download(data, name) {
@@ -203,13 +211,14 @@ function download(data, name) {
   const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 document.addEventListener('click', event => {
+  if (limp.handleClick(event)) return;
   const button = event.target.closest('[data-do]'); if (!button || button.disabled) return;
   event.preventDefault();
   const d = button.dataset;
   switch (d.do) {
     case 'nav':
       if (d.page === 'range' && unanswered()) { state.guided = true; state.revealed = true; }
-      state.page = d.page; if (!state.question && state.page !== 'mistakes') newQuestion(); else render(); break;
+      state.page = d.page; if (!state.question && ['train', 'range'].includes(state.page)) newQuestion(); else render(); break;
     case 'table': state.settings.table = Number(d.table); state.review = null; normalizePosition(); persist(); newQuestion(); break;
     case 'answer': answer(d.action); break;
     case 'next': nextQuestion(); break;
@@ -221,7 +230,7 @@ document.addEventListener('click', event => {
     case 'close-modal': state.modal = null; render(); break;
     case 'import-range': $('#range-upload').click(); break;
     case 'export-range': download(exportProfile(profile()), 'preflop-range-template.json'); toast('范围模板已导出'); break;
-    case 'export-progress': download({ version: 1, exportedAt: new Date().toISOString(), progress: state.progress, profiles: state.profiles, settings: state.settings }, 'preflop-progress-backup.json'); break;
+    case 'export-progress': download({ version: 1, exportedAt: new Date().toISOString(), progress: state.progress, profiles: state.profiles, settings: state.settings, limp: limp.backup() }, 'preflop-progress-backup.json'); break;
     case 'notebook-status': state.notebookStatus = d.value; render(); break;
     case 'review-all': startReview(filteredMistakes().filter(m => !m.mastered).map(m => m.key)); break;
     case 'review-one': startReview([d.key]); break;
@@ -235,6 +244,7 @@ document.addEventListener('click', event => {
   }
 });
 document.addEventListener('change', async event => {
+  if (await limp.handleChange(event)) return;
   const el = event.target;
   if (el.id === 'range-upload') {
     const file = el.files?.[0]; if (!file) return;
@@ -255,6 +265,7 @@ document.addEventListener('change', async event => {
   state.review = null; normalizePosition(); persist(); newQuestion();
 });
 document.addEventListener('keydown', event => {
+  if (limp.handleKeydown(event)) return;
   if (state.modal) {
     if (event.key === 'Escape') { state.modal = null; render(); }
     if (event.key === 'Tab') {
