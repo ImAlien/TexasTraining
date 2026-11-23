@@ -1,0 +1,13 @@
+DATA LICENSE — CC BY 4.0
+
+The datasets in the upstream matrix/ and pushfold/ directories are licensed under
+the Creative Commons Attribution 4.0 International license (CC BY 4.0).
+
+Full legal text: https://creativecommons.org/licenses/by/4.0/legalcode
+Data source: HoldemMath — https://holdemmath.com/
+Upstream license: https://github.com/Julian-cloud-max/holdemmath-data/blob/7c72b1261f08c63cf8366120dc531631935c21cd/LICENSE-DATA
+SPDX-License-Identifier: CC-BY-4.0
+
+This application extracts the heads-up, no-ante subset. It maps hand indices
+and discrete range membership to its training interface. It does not supply
+or reconstruct the solver's unpublished mixed-action frequencies.

@@ -1,4 +1,5 @@
-import { RANKS, HANDS, POSITIONS, ACTIONS, BASE_PROFILE, COMBOS, frequencies, availableScenarios, makeQuestion, dealCards, grade, rangeSummary, recordAttempt, validateProfile, exportProfile, explanation, openSize, raiseSize, callAmount, potSize, canCall } from './engine.js';
+import { RANKS, HANDS, POSITIONS, ACTIONS, BASE_PROFILE, COMBOS, frequencies, availableScenarios, makeQuestion, dealCards, grade, rangeSummary, recordAttempt, validateProfile, exportProfile, explanation, openSize, raiseSize, callAmount, potSize, canCall, canRaise, isPushFold, builtinProfile } from './engine.js';
+import { PUBLIC_PROFILES, DEFAULT_PUBLIC_PROFILE, PUBLIC_SOURCE } from './public-ranges.js';
 import { readState, writeState, STORAGE_KEY } from './storage.js';
 
 const $ = selector => document.querySelector(selector);
@@ -21,14 +22,16 @@ let local;
 try { local = window.localStorage; } catch { local = { getItem() { throw new Error('Unavailable'); }, setItem() { throw new Error('Unavailable'); } }; }
 const saved = readState(local);
 const state = { ...saved, page: 'train', question: null, result: null, revealed: false, guided: false, hint: false, inspected: null, review: null, round: 1, notebookTable: 'all', notebookStatus: 'active', modal: null, saveEnabled: !saved.warning };
-const profile = (id = state.settings.profileId) => id === BASE_PROFILE.id ? BASE_PROFILE : state.profiles.find(p => p.id === id) || BASE_PROFILE;
+const profile = (id = state.settings.profileId) => builtinProfile(id) || state.profiles.find(p => p.id === id) || BASE_PROFILE;
 const activeProfile = () => profile(state.question?.profileId);
 const unanswered = () => state.question && !state.result && !state.revealed;
 const names = { fold: '弃牌', call: '跟注', raise: '加注' };
 const tableName = n => Number(n) === 2 ? '单挑桌' : `${n} 人桌`;
-const sceneName = q => q.scene === 'rfi' ? '率先入池' : `面对 ${q.opener} 加注`;
+const sceneName = q => isPushFold(q) ? (q.scene === 'rfi' ? '率先全下 / 弃牌' : '面对 SB 全下') : q.scene === 'rfi' ? '率先入池' : `面对 ${q.opener} 加注`;
 const positionName = (table, p) => table === 2 && p === 'SB' ? 'SB / BTN' : p;
-const actionName = (action, q = state.question) => action === 'call' && q?.scene === 'rfi' && q.hero === 'SB' ? 'Limp' : action === 'raise' && q?.scene === 'defend' ? '3-bet' : names[action];
+const actionName = (action, q = state.question) => isPushFold(q) ? ({ fold: '弃牌', call: '跟全下', raise: '全下' })[action] : action === 'call' && q?.scene === 'rfi' && q.hero === 'SB' ? 'Limp' : action === 'raise' && q?.scene === 'defend' ? '3-bet' : names[action];
+const profileLabel = p => p.provenance ? '公开推弃图表 · 近似 Nash' : p.id === BASE_PROFILE.id ? '教学近似 · 非 GTO' : '用户导入 · 来源未验证';
+const formatStrategy = (f, q) => ACTIONS.filter(a => f[a] > 0).map(a => `${actionName(a, q)}${profile(q.profileId).representation === 'binary-chart' ? '' : ' ' + f[a] + '%'}`).join(' · ');
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 3500); }
 function persist() {
@@ -62,7 +65,7 @@ function nextQuestion() {
   state.round++; newQuestion();
 }
 function answer(action) {
-  if (!unanswered() || (action === 'call' && !canCall(state.question))) return;
+  if (!unanswered() || (action === 'call' && !canCall(state.question)) || (action === 'raise' && !canRaise(state.question))) return;
   const f = frequencies(state.question, state.question.hand, activeProfile());
   const out = recordAttempt(state.progress, state.question, action, f, { guided: state.guided, review: !!state.review });
   state.progress = out.progress; state.result = { ...out.result, action }; state.revealed = true; state.inspected = state.question.hand;
@@ -83,10 +86,11 @@ function config() {
   const positions = POSITIONS[state.settings.table].filter(pos => options.some(s => s.hero === pos));
   return `<aside class="sidebar"><div class="section-label">${icon('tune')}训练设置</div><label class="field-label">桌型 <span>TABLE SIZE</span></label>
     <div class="segmented">${[6, 9, 2].map(n => `<button data-do="table" data-table="${n}" class="${state.settings.table === n ? 'selected' : ''}" aria-pressed="${state.settings.table === n}">${n === 2 ? '单挑' : `${n} 人桌`}</button>`).join('')}</div>
-    <label class="field-label" for="scene">训练场景</label><div class="select-wrap"><select id="scene" data-setting="scene"><option value="rfi" ${state.settings.scene === 'rfi' ? 'selected' : ''}>率先入池 · RFI</option><option value="defend" ${state.settings.scene === 'defend' ? 'selected' : ''}>面对加注 · vs Open</option><option value="mixed" ${state.settings.scene === 'mixed' ? 'selected' : ''}>混合场景</option></select></div>
+    <label class="field-label" for="scene">训练场景</label><div class="select-wrap"><select id="scene" data-setting="scene"><option value="rfi" ${state.settings.scene === 'rfi' ? 'selected' : ''}>${isPushFold(p) ? 'SB 推弃 · Jam / Fold' : '率先入池 · RFI'}</option><option value="defend" ${state.settings.scene === 'defend' ? 'selected' : ''}>${isPushFold(p) ? 'BB 防守 · vs Jam' : '面对加注 · vs Open'}</option><option value="mixed" ${state.settings.scene === 'mixed' ? 'selected' : ''}>混合场景</option></select></div>
     <label class="field-label" for="position">我的位置</label><div class="select-wrap"><select id="position" data-setting="position"><option value="random">随机位置</option>${positions.map(pos => `<option value="${pos}" ${state.settings.position === pos ? 'selected' : ''}>${positionName(state.settings.table, pos)}</option>`).join('')}</select></div>
-    <div class="setting-divider"></div><div class="meta-row"><span>有效筹码</span><strong>100 <small>BB</small></strong></div><div class="meta-row"><span>前注</span><strong>无前注</strong></div><div class="meta-row"><span>游戏类型</span><strong>无限注德州</strong></div>
-    <label class="field-label" for="profile">策略范围库</label><div class="select-wrap"><select id="profile" data-setting="profileId"><option value="teaching-v1" ${p.id === 'teaching-v1' ? 'selected' : ''}>基础教学范围</option>${state.profiles.map(x => `<option value="${esc(x.id)}" ${p.id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+    <div class="setting-divider"></div><div class="meta-row"><span>有效筹码</span><strong>${p.stack} <small>BB</small></strong></div><div class="meta-row"><span>前注</span><strong>无前注</strong></div><div class="meta-row"><span>游戏类型</span><strong>${isPushFold(p) ? '单挑 · 推弃限定' : '无限注德州'}</strong></div>
+    <label class="field-label" for="profile">策略范围库</label><div class="select-wrap"><select id="profile" data-setting="profileId"><option value="${p.provenance ? p.id : DEFAULT_PUBLIC_PROFILE.id}" ${p.provenance ? 'selected' : ''}>单挑推弃 · 公开求解图表</option><option value="teaching-v1" ${p.id === 'teaching-v1' ? 'selected' : ''}>100BB 教学（非 GTO）</option>${state.profiles.map(x => `<option value="${esc(x.id)}" ${p.id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+    ${p.provenance ? `<label class="field-label" for="depth">推弃筹码深度</label><div class="select-wrap"><select id="depth" data-setting="profileId">${PUBLIC_PROFILES.map(x => `<option value="${x.id}" ${p.id === x.id ? 'selected' : ''}>${x.stack} BB</option>`).join('')}</select></div>` : ''}
     <button class="subtle-link" data-do="method">${icon('info')}范围来源与假设</button>
     <div class="sidebar-bottom"><div class="practice-note">${icon('spark')}<div><strong>专注一个决策</strong><p>先思考，再看答案。<br>把薄弱位置留给下一轮。</p></div></div><div class="storage-caption">记录保存在当前浏览器</div></div>
     ${state.review ? '<div class="review-setting-note">当前正在复习历史错题。更改设置将退出复习。</div>' : ''}</aside>`;
@@ -100,33 +104,33 @@ function cards(q, small = false) {
 }
 function table(q) {
   const seats = POSITIONS[q.table], heroIndex = seats.indexOf(q.hero), openerIndex = seats.indexOf(q.opener);
-  return `<div class="table-stage table-${q.table}"><div class="poker-table"><div class="table-inner-line"></div><div class="table-watermark">♠<span>PREFLOP LAB</span></div><div class="pot"><span class="chip-stack"><i></i><i></i><i></i></span>底池 <strong>${potSize(q)} BB</strong></div><div class="board-placeholders"><i></i><i></i><i></i><i></i><i></i></div><span class="table-stakes">NL HOLD’EM · 100 BB</span></div>
+  return `<div class="table-stage table-${q.table}"><div class="poker-table"><div class="table-inner-line"></div><div class="table-watermark">♠<span>PREFLOP LAB</span></div><div class="pot"><span class="chip-stack"><i></i><i></i><i></i></span>底池 <strong>${potSize(q)} BB</strong></div><div class="board-placeholders"><i></i><i></i><i></i><i></i><i></i></div><span class="table-stakes">${isPushFold(q) ? 'PUSH / FOLD' : 'NL HOLD’EM'} · ${q.stack || 100} BB</span></div>
     ${seats.map((pos, i) => {
       const hero = pos === q.hero, opener = pos === q.opener, folded = !hero && !opener && i < heroIndex;
       const angle = Math.PI / 2 + (i - heroIndex) * 2 * Math.PI / seats.length;
       const x = 50 + Math.cos(angle) * 40, y = 47 + Math.sin(angle) * 38;
       const posted = opener ? openSize(q) : pos === 'SB' ? 0.5 : pos === 'BB' ? 1 : 0;
-      let status = hero ? '你的回合' : opener ? `加注 ${openSize(q)} BB` : folded ? '已弃牌' : '等待行动';
+      let status = hero ? '你的回合' : opener ? `${isPushFold(q) ? '全下' : '加注'} ${openSize(q)} BB` : folded ? '已弃牌' : '等待行动';
       if (hero && state.result) status = actionName(state.result.action, q);
-      return `<div class="seat ${hero ? 'hero-seat' : ''} ${folded ? 'folded' : ''} ${opener ? 'opener-seat' : ''}" style="--seat-x:${x}%;--seat-y:${y}%"><div class="seat-avatar">${hero ? '你' : pos === 'BTN' || q.table === 2 && pos === 'SB' ? '♠' : '<span class="mini-card"></span><span class="mini-card"></span>'}</div><div class="seat-info"><strong>${positionName(q.table, pos)}</strong><span>${100 - posted} BB</span></div><div class="seat-status">${status}</div>${pos === 'BTN' || q.table === 2 && pos === 'SB' ? '<span class="dealer" title="庄家按钮">D</span>' : ''}</div>`;
+      return `<div class="seat ${hero ? 'hero-seat' : ''} ${folded ? 'folded' : ''} ${opener ? 'opener-seat' : ''}" style="--seat-x:${x}%;--seat-y:${y}%"><div class="seat-avatar">${hero ? '你' : pos === 'BTN' || q.table === 2 && pos === 'SB' ? '♠' : '<span class="mini-card"></span><span class="mini-card"></span>'}</div><div class="seat-info"><strong>${positionName(q.table, pos)}</strong><span>${(q.stack || 100) - posted} BB</span></div><div class="seat-status">${status}</div>${pos === 'BTN' || q.table === 2 && pos === 'SB' ? '<span class="dealer" title="庄家按钮">D</span>' : ''}</div>`;
     }).join('')}
     <div class="hero-hand">${cards(q)}<div class="hand-caption">${q.hand} <span>· ${q.hand.length === 2 ? '口袋对子' : q.hand.endsWith('s') ? '同花' : '非同花'}</span></div></div></div>`;
 }
 function feedback(q) {
-  if (!state.revealed && !state.hint) return `<div class="decision-prompt"><span class="prompt-dot"></span>轮到你了，这手牌如何行动？<small>F 弃牌 · C 跟注 · R 加注</small></div>`;
+  if (!state.revealed && !state.hint) return `<div class="decision-prompt"><span class="prompt-dot"></span>轮到你了，这手牌如何行动？<small>${isPushFold(q) ? q.scene === 'rfi' ? 'F 弃牌 · R 全下' : 'F 弃牌 · C 跟全下' : 'F 弃牌 · C 跟注 · R 加注'}</small></div>`;
   if (state.hint && !state.revealed) return `<div class="feedback hint-feedback">${icon('spark')}<div><strong>思路提示 <span class="tiny-badge">本题不计分</span></strong><p>${explanation(q)}</p></div></div>`;
   const f = frequencies(q, q.hand, activeProfile()), best = grade(f, 'fold').best;
   const title = state.result ? state.guided ? '已完成辅助练习' : state.result.correct ? state.result.mixed ? '合理选择，属于混合策略' : '正确，继续保持' : '这手牌值得再练一次' : '参考答案已揭晓';
-  const detail = ACTIONS.filter(a => f[a] > 0).map(a => `${actionName(a, q)} ${f[a]}%`).join(' · ');
+  const detail = formatStrategy(f, q);
   return `<div class="feedback ${state.result && !state.result.correct && !state.guided ? 'incorrect' : 'correct'}" role="status">${icon(state.result?.correct ? 'check' : state.result ? 'book' : 'eye')}<div><strong>${title}</strong><p>${q.hand}：${detail}${state.result && !state.result.correct && !state.guided ? '。已加入错题本。' : '。'}</p><p class="feedback-note">${state.guided ? '看过提示或范围，本题不计入统计和复习进度。' : state.result?.mixed ? '范围内的行动均可接受；长期应按频率混合选择。' : `当前范围的主要行动：${actionName(best, q)}。`}</p></div></div>`;
 }
 function trainer() {
   const q = state.question;
-  if (!q) return `<section class="empty panel">${icon('grid')}<h2>这个范围库暂无匹配场景</h2><p>请切换桌型或训练场景，或选择基础教学范围。</p><button data-do="reset-filters" class="primary-button">回到基础训练</button></section>`;
+  if (!q) return `<section class="empty panel">${icon('grid')}<h2>这个范围库暂无匹配场景</h2><p>${isPushFold(profile()) ? '公开求解图表仅覆盖单挑短码。6 人桌、9 人桌及 100BB 完整 GTO 尚无合格公开数据接入。' : '请切换桌型、训练场景或位置。'}</p><div class="button-row"><button data-do="public-mode" class="primary-button">单挑推弃训练</button><button data-do="reset-filters" class="outline-button">使用 100BB 教学（非 GTO）</button></div></section>`;
   const locked = !unanswered();
   return `<div class="training-layout"><section class="arena panel"><div class="arena-heading"><div class="live-label"><span></span>${state.review ? '错题专项复习' : '翻前决策训练'}</div><span class="round-label">${state.review ? `${state.review.index + 1} / ${state.review.keys.length}` : `本次第 ${String(state.round).padStart(2, '0')} 手`}</span></div>
-    <div class="spot-tags"><span>${tableName(q.table)}</span><span>${positionName(q.table, q.hero)}</span><span>${q.scene === 'rfi' ? 'RFI · 前面全部弃牌' : `${q.opener} 开池 ${openSize(q)} BB`}</span>${state.review ? '<button class="text-button" data-do="end-review">结束复习</button>' : ''}</div>
-    ${table(q)}<div class="decision-area">${feedback(q)}<div class="action-buttons">${ACTIONS.map(a => `<button data-do="answer" data-action="${a}" class="action action-${a}" ${locked || a === 'call' && !canCall(q) ? 'disabled' : ''}><span>${actionName(a, q)}<kbd>${a[0].toUpperCase()}</kbd></span><small>${a === 'fold' ? 'FOLD' : a === 'call' ? canCall(q) ? `补入 ${callAmount(q)} BB` : '此场景不开放跟注' : `至 ${raiseSize(q)} BB`}</small></button>`).join('')}</div>
+    <div class="spot-tags"><span>${tableName(q.table)}</span><span>${positionName(q.table, q.hero)}</span><span>${isPushFold(q) ? `${q.stack}BB · ${sceneName(q)}` : q.scene === 'rfi' ? 'RFI · 前面全部弃牌' : `${q.opener} 开池 ${openSize(q)} BB`}</span>${state.review ? '<button class="text-button" data-do="end-review">结束复习</button>' : ''}</div>
+    ${table(q)}<div class="decision-area">${feedback(q)}<div class="action-buttons ${isPushFold(q) ? 'pushfold-actions' : ''}">${ACTIONS.filter(a => !isPushFold(q) || a === 'fold' || (q.scene === 'rfi' ? a === 'raise' : a === 'call')).map(a => `<button data-do="answer" data-action="${a}" class="action action-${a}" ${locked || a === 'call' && !canCall(q) || a === 'raise' && !canRaise(q) ? 'disabled' : ''}><span>${actionName(a, q)}<kbd>${a[0].toUpperCase()}</kbd></span><small>${a === 'fold' ? 'FOLD' : a === 'call' ? canCall(q) ? `补入 ${callAmount(q)} BB` : '此场景不开放跟注' : `至 ${raiseSize(q)} BB`}</small></button>`).join('')}</div>
     <div class="training-tools"><button class="text-button" data-do="hint" ${locked || state.hint ? 'disabled' : ''}>${icon('spark')}给我提示</button><button class="text-button" data-do="reveal" ${locked ? 'disabled' : ''}>${icon('eye')}查看答案</button><button class="next-button" data-do="next">${state.revealed ? '下一手' : '跳过'}<kbd>空格</kbd></button></div></div></section>
     ${rangePanel(false)}</div>`;
 }
@@ -136,11 +140,12 @@ function rangeGrid(q, unlocked) {
   const p = activeProfile();
   return `<div class="range-grid ${unlocked ? '' : 'concealed'}" aria-label="169 种翻前手牌范围">${HANDS.map(h => {
     const f = unlocked ? frequencies(q, h, p) : null;
-    return `<button class="range-cell ${h.length === 2 ? 'pair' : ''} ${h === state.inspected ? 'selected-hand' : ''} ${unlocked && f.raise + f.call >= 50 ? 'light-cell' : ''}" data-do="inspect" data-hand="${h}" style="${f ? `background:${rangeStyle(f)}` : ''}" aria-label="${h}${f ? `，加注 ${f.raise}%，${actionName('call', q)} ${f.call}%，弃牌 ${f.fold}%` : '，答案未揭晓'}" ${h === state.inspected ? 'aria-pressed="true"' : 'aria-pressed="false"'}>${h}</button>`;
+    return `<button class="range-cell ${h.length === 2 ? 'pair' : ''} ${h === state.inspected ? 'selected-hand' : ''} ${unlocked && f.raise + f.call >= 50 ? 'light-cell' : ''}" data-do="inspect" data-hand="${h}" style="${f ? `background:${rangeStyle(f)}` : ''}" aria-label="${h}${f ? activeProfile().representation === 'binary-chart' ? `，图表行动：${formatStrategy(f, q)}` : `，${actionName('raise', q)} ${f.raise}%，${actionName('call', q)} ${f.call}%，弃牌 ${f.fold}%` : '，答案未揭晓'}" ${h === state.inspected ? 'aria-pressed="true"' : 'aria-pressed="false"'}>${h}</button>`;
   }).join('')}</div>`;
 }
 function handDetail(q, hand) {
   const f = frequencies(q, hand, activeProfile());
+  if (activeProfile().representation === 'binary-chart') return `<div class="hand-detail"><div class="hand-detail-title"><strong>${hand}</strong><span>${COMBOS(hand)} 个组合</span></div><div class="chart-answer">图表行动 <strong>${formatStrategy(f, q)}</strong></div><p class="chart-caption">来源只发布入选手牌列表，未提供完整混合频率。格子颜色表示是否入选，不表示精确 100% 频率。</p></div>`;
   return `<div class="hand-detail"><div class="hand-detail-title"><strong>${hand}</strong><span>${COMBOS(hand)} 个组合${hand === q.hand ? ' · 当前手牌' : ''}</span></div>${['raise', 'call', 'fold'].map(a => `<div class="frequency-row"><span><i style="background:${colors[a]}"></i>${actionName(a, q)}</span><div class="frequency-track"><div style="width:${f[a]}%;background:${colors[a]}"></div></div><strong>${Number(f[a].toFixed(1))}%</strong></div>`).join('')}</div>`;
 }
 function rangePanel(full) {
@@ -148,16 +153,16 @@ function rangePanel(full) {
   if (!q) return '';
   const unlocked = full || state.revealed;
   const summary = unlocked ? rangeSummary(q, activeProfile()) : null;
-  return `<aside class="range-panel panel ${full ? 'full-range' : ''}"><div class="range-heading"><div><span class="eyebrow">PREFLOP RANGE</span><h2>${full ? '探索翻前范围' : '策略范围'}</h2></div>${icon('grid')}</div><div class="range-context"><strong>${positionName(q.table, q.hero)} ${q.scene === 'rfi' ? '开池范围' : `vs ${q.opener}`}</strong><span>${tableName(q.table)} · 100BB</span></div>
-    <div class="range-legend"><span><i class="raise-dot"></i>加注</span><span><i class="call-dot"></i>${actionName('call', q)}</span><span><i class="fold-dot"></i>弃牌</span></div>${rangeGrid(q, unlocked)}
+  return `<aside class="range-panel panel ${full ? 'full-range' : ''}"><div class="range-heading"><div><span class="eyebrow">PREFLOP RANGE</span><h2>${full ? '探索翻前范围' : '策略范围'}</h2></div>${icon('grid')}</div><div class="range-context"><strong>${positionName(q.table, q.hero)} ${q.scene === 'rfi' ? isPushFold(q) ? '全下范围' : '开池范围' : `vs ${q.opener}`}</strong><span>${tableName(q.table)} · ${q.stack || 100}BB</span></div>
+    <div class="range-legend"><span><i class="raise-dot"></i>${actionName('raise', q)}</span><span><i class="call-dot"></i>${actionName('call', q)}</span><span><i class="fold-dot"></i>弃牌</span></div>${rangeGrid(q, unlocked)}
     <div class="matrix-caption"><span>左下：非同花 o</span><span>右上：同花 s</span></div>
     ${unlocked ? `<div class="range-aggregate"><span>加权入池范围</span><strong>${(summary.raise + summary.call).toFixed(1)}<small>%</small></strong></div>${handDetail(q, state.inspected || q.hand)}` : `<div class="range-locked">${icon('eye')}<strong>做出选择后，解锁范围</strong><p>先独立思考，再与策略对照。</p></div>`}
-    <div class="range-footnote">${icon('info')}<span>${activeProfile().id === BASE_PROFILE.id ? '教学近似范围 · 非精确 GTO' : '用户导入范围 · 求解来源未验证'}<br>按实际组合数计算频率，混合行动均可接受。</span></div></aside>`;
+    <div class="range-footnote">${icon('info')}<span>${profileLabel(activeProfile())}<br>${activeProfile().provenance ? 'HoldemMath · CC BY 4.0；仅用于限定推弃模型。' : '按实际组合数计算频率，混合行动均可接受。'}</span></div></aside>`;
 }
 function rangeView() {
   const q = state.question;
   if (!q) return trainer();
-  return `<div class="range-library-layout">${rangePanel(true)}<div class="range-notes"><section class="panel note-panel"><span class="eyebrow">STUDY THE SPOT</span><h2>读懂这一个位置</h2><div class="spot-big">${positionName(q.table, q.hero)}<span>${sceneName(q)}</span></div><p>${explanation(q)}</p><p>矩阵中的每格代表一种起手牌。点击任意手牌，查看弃牌、跟注或加注的建议频率。</p><div class="note-divider"></div><h3>如何理解混合策略？</h3><p>例如加注 50%、弃牌 50%，两种行动都属于范围。训练按行动是否在范围内判分，不用随机抽中的行动作为唯一答案。</p><button class="primary-button" data-do="nav" data-page="train">返回训练室</button></section><section class="panel note-panel"><h3>使用自己的范围</h3><p>可导入符合当前下注尺度的完整场景。先导出 JSON 模板，再替换为你有权使用的求解数据。</p><div class="button-row"><button class="outline-button" data-do="export-range">${icon('download')}导出模板</button><button class="outline-button" data-do="import-range">${icon('upload')}导入范围</button></div></section></div></div>`;
+  return `<div class="range-library-layout">${rangePanel(true)}<div class="range-notes"><section class="panel note-panel"><span class="eyebrow">STUDY THE SPOT</span><h2>读懂这一个位置</h2><div class="spot-big">${positionName(q.table, q.hero)}<span>${sceneName(q)}</span></div><p>${explanation(q)}</p><p>矩阵中的每格代表一种起手牌。点击任意手牌，查看弃牌、跟注或加注的建议频率。</p><div class="note-divider"></div><h3>${activeProfile().representation === 'binary-chart' ? '图表的精度与边界' : '如何理解混合策略？'}</h3><p>${activeProfile().representation === 'binary-chart' ? '按发布者给出的离散手牌列表训练。来源声明 HU 最佳响应偏差 ε ≤ 0.05BB，未独立复算，也没有发布完整混合频率；边界牌未选动作不等同于已证明亏损。' : '例如加注 50%、弃牌 50%，两种行动都属于范围。训练按行动是否在范围内判分，不用随机抽中的行动作为唯一答案。'}</p><button class="primary-button" data-do="nav" data-page="train">返回训练室</button></section><section class="panel note-panel"><h3>使用自己的范围</h3><p>可导入符合当前下注尺度的完整场景。先导出 JSON 模板，再替换为你有权使用的求解数据。</p><div class="button-row"><button class="outline-button" data-do="export-range">${icon('download')}导出模板</button><button class="outline-button" data-do="import-range">${icon('upload')}导入范围</button></div></section></div></div>`;
 }
 function filteredMistakes() { return state.progress.mistakes.filter(m => (state.notebookTable === 'all' || m.question.table === Number(state.notebookTable)) && (state.notebookStatus === 'all' || (state.notebookStatus === 'mastered' ? m.mastered : !m.mastered))); }
 function notebook() {
@@ -165,23 +170,32 @@ function notebook() {
   return `<section class="notebook panel"><div class="notebook-header"><div><span class="eyebrow">LEARN FROM EVERY HAND</span><h2>把错过的，再赢回来。</h2><p>同一场景自动合并，连续答对 3 次复习后标记为已掌握。</p></div><button class="primary-button" data-do="review-all" ${list.filter(m => !m.mastered).length ? '' : 'disabled'}>${icon('train')}开始专项复习</button></div>
     <div class="notebook-summary"><span>全部错题 <strong>${total}</strong></span><span>待巩固 <strong>${total - mastered}</strong></span><span>已掌握 <strong class="mint">${mastered}</strong></span></div>
     <div class="notebook-filters"><div class="filter-tabs">${[['active', '待巩固'], ['mastered', '已掌握'], ['all', '全部']].map(([v, t]) => `<button class="${state.notebookStatus === v ? 'selected' : ''}" data-do="notebook-status" data-value="${v}">${t}</button>`).join('')}</div><div class="select-wrap compact-select"><select aria-label="错题桌型筛选" data-setting="notebookTable">${[['all', '全部桌型'], [6, '6 人桌'], [9, '9 人桌'], [2, '单挑桌']].map(([v, t]) => `<option value="${v}" ${String(state.notebookTable) === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select></div><button class="text-button" data-do="export-progress">${icon('download')}导出记录</button></div>
-    ${list.length ? `<div class="mistake-list">${list.map(m => { const q = m.question, f = frequencies(q, q.hand, profile(q.profileId)); return `<article class="mistake-item"><div class="mistake-hand">${q.hand}</div><div class="mistake-description"><strong>${tableName(q.table)} · ${positionName(q.table, q.hero)} <span>${sceneName(q)}</span></strong><p>你的选择：${actionName(m.lastAction, q)}<span class="mistake-answer">范围：${ACTIONS.filter(a => f[a] > 0).map(a => `${actionName(a, q)} ${f[a]}%`).join(' / ')}</span></p><small>${esc(profile(q.profileId).name)} · 错误 ${m.misses} 次</small></div><div class="mastery"><div>${[1, 2, 3].map(n => `<i class="${m.successes >= n ? 'done' : ''}"></i>`).join('')}</div><span>${m.mastered ? '已掌握' : `复习 ${m.successes}/3`}</span></div><button class="outline-button" data-do="review-one" data-key="${esc(m.key)}">再练一次</button><button class="icon-button delete-item" data-do="delete-mistake" data-key="${esc(m.key)}" aria-label="删除 ${q.hand} 错题">${icon('close')}</button></article>`; }).join('')}</div>` : `<div class="empty notebook-empty">${icon('book')}<h3>${total ? '这里暂时没有错题' : '让每一次失误都有收获'}</h3><p>${total ? '切换筛选条件，或回到训练室继续练习。' : '独立答题中的错误会自动收录在这里。'}</p><button class="outline-button" data-do="nav" data-page="train">去练几手</button></div>`}</section>`;
+    ${list.length ? `<div class="mistake-list">${list.map(m => { const q = m.question, f = frequencies(q, q.hand, profile(q.profileId)); return `<article class="mistake-item"><div class="mistake-hand">${q.hand}</div><div class="mistake-description"><strong>${tableName(q.table)} · ${positionName(q.table, q.hero)} <span>${sceneName(q)}</span></strong><p>你的选择：${actionName(m.lastAction, q)}<span class="mistake-answer">范围：${formatStrategy(f, q)}</span></p><small>${esc(profile(q.profileId).name)} · 错误 ${m.misses} 次</small></div><div class="mastery"><div>${[1, 2, 3].map(n => `<i class="${m.successes >= n ? 'done' : ''}"></i>`).join('')}</div><span>${m.mastered ? '已掌握' : `复习 ${m.successes}/3`}</span></div><button class="outline-button" data-do="review-one" data-key="${esc(m.key)}">再练一次</button><button class="icon-button delete-item" data-do="delete-mistake" data-key="${esc(m.key)}" aria-label="删除 ${q.hand} 错题">${icon('close')}</button></article>`; }).join('')}</div>` : `<div class="empty notebook-empty">${icon('book')}<h3>${total ? '这里暂时没有错题' : '让每一次失误都有收获'}</h3><p>${total ? '切换筛选条件，或回到训练室继续练习。' : '独立答题中的错误会自动收录在这里。'}</p><button class="outline-button" data-do="nav" data-page="train">去练几手</button></div>`}</section>`;
 }
 function modal() {
   if (!state.modal) return '';
   let title = '', body = '';
   if (state.modal.type === 'help') {
-    title = '从第一手开始'; body = '<ol class="guide-steps"><li><strong>选择桌型和场景</strong><p>支持单挑、6 人桌、9 人桌，以及率先入池、面对一次开池加注。暂不训练挤压、面对 3-bet 或多人跟注。</p></li><li><strong>独立做出决策</strong><p>选择弃牌、跟注 / limp、加注。看提示、答案或进入范围库后，本题变为不计分的辅助练习。</p></li><li><strong>读懂频率</strong><p>混合策略中，频率大于 0 的行动都算合理。符合范围率衡量行动是否在范围内，不代表 EV 或长期频率执行水平。</p></li><li><strong>回访你的错题</strong><p>错题按范围库、桌型、场景、位置和手牌合并。连续 3 次独立复习正确后自动标记为已掌握。</p></li></ol><div class="keyboard-help"><kbd>F</kbd>弃牌 <kbd>C</kbd>跟注 <kbd>R</kbd>加注 <kbd>空格</kbd>下一手</div>';
+    title = '从第一手开始'; body = '<ol class="guide-steps"><li><strong>选择桌型和场景</strong><p>支持单挑、6 人桌、9 人桌，以及率先入池、面对一次开池加注。100BB 为教学近似，非 GTO。公开数据模式为单挑 4–20BB 推弃，只有 SB 全下 / 弃牌和 BB 跟全下 / 弃牌。</p></li><li><strong>独立做出决策</strong><p>选择弃牌、跟注 / limp、加注。看提示、答案或进入范围库后，本题变为不计分的辅助练习。</p></li><li><strong>读懂频率</strong><p>混合策略中，频率大于 0 的行动都算合理。符合范围率衡量行动是否在范围内，不代表 EV 或长期频率执行水平。</p></li><li><strong>回访你的错题</strong><p>错题按范围库、桌型、场景、位置和手牌合并。连续 3 次独立复习正确后自动标记为已掌握。</p></li></ol><div class="keyboard-help"><kbd>F</kbd>弃牌 <kbd>C</kbd>跟注 <kbd>R</kbd>加注 <kbd>空格</kbd>下一手</div>';
   } else if (state.modal.type === 'method') {
-    const p = activeProfile(); title = '范围来源与假设'; body = `<div class="source-badge">${p.id === BASE_PROFILE.id ? '教学近似策略' : '用户自定义策略'}</div><h3>${esc(p.name)}</h3><p>${esc(p.description)}</p><dl class="method-list"><div><dt>来源</dt><dd>${esc(p.source)}</dd></div><div><dt>有效筹码 / 前注</dt><dd>100BB / 0BB</dd></div><div><dt>抽水</dt><dd>${esc(p.rake)}</dd></div><div><dt>常规开池</dt><dd>2.5BB；小盲 3BB；单挑小盲 2.5BB</dd></div><div><dt>3-bet</dt><dd>有位置 8BB；无位置 10BB</dd></div></dl><p class="method-notice">内置频率为手工设计，没有运行均衡求解器。精确 GTO 依赖抽水、有效筹码、下注尺度及完整博弈树；本应用不提供计算过的 EV。可导入匹配参数的合法求解数据用于训练。</p><div class="button-row"><button class="outline-button" data-do="export-range">${icon('download')}导出 JSON 模板</button><button class="primary-button" data-do="import-range">${icon('upload')}导入自定义范围</button></div>`;
+    const p = activeProfile(); title = '范围来源与适用参数';
+    body = `<div class="source-badge">${profileLabel(p)}</div><h3>${esc(p.name)}</h3><p>${esc(p.description)}</p>
+    <dl class="method-list"><div><dt>来源</dt><dd>${esc(p.source)}</dd></div><div><dt>有效筹码 / 前注</dt><dd>${p.stack}BB / 0BB</dd></div><div><dt>抽水</dt><dd>${esc(p.rake)}</dd></div><div><dt>下注与目标</dt><dd>${isPushFold(p) ? '等起始筹码（含盲注）；SB 0.5BB / BB 1BB；仅全下、跟全下、弃牌；chipEV，无 ICM' : '常规开池 2.5BB；SB 3BB；HU SB 2.5BB；3-bet IP 8BB / OOP 10BB（BB vs SB 8BB）'}</dd></div></dl>
+    ${p.provenance ? `<div class="source-links"><a href="${PUBLIC_SOURCE.website}" target="_blank" rel="noopener">HoldemMath (holdemmath.com)</a><a href="${PUBLIC_SOURCE.dataUrl}" target="_blank" rel="noopener">原始数据</a><a href="${PUBLIC_SOURCE.readmeUrl}" target="_blank" rel="noopener">求解说明</a><a href="${PUBLIC_SOURCE.licenseUrl}" target="_blank" rel="noopener">CC BY 4.0 授权</a></div><p class="method-notice">作者的 fictitious-play 求解器；来源声明单挑 ε ≤ 0.05BB（最佳响应偏差），本项目未独立复算。数据为离散范围列表，不含完整混合频率；判分仅检查是否符合发布的图表，不衡量 EV 损失。</p><p>版本 ${PUBLIC_SOURCE.commit.slice(0, 12)} · 获取日期 ${PUBLIC_SOURCE.retrievedAt}。改动：仅提取 HU 无前注的七档深度，映射手牌与行动；未插值或推算缺失范围。</p><p><a href="/src/data/holdemmath-hu.json" download>下载本地数据快照与来源记录</a></p>` : `<p class="method-notice">${p.id === BASE_PROFILE.id ? '此库是手工教学范围，没有均衡求解或 EV 验证。原错题继续使用原版本。' : '这是用户导入的范围；本应用只验证格式与合法行动，不独立验证求解来源和精度。'}</p>`}
+    <div class="coverage-note"><strong>当前数据覆盖</strong><p>单挑短码：公开近似 Nash 推弃图表，7 档深度。<br>单挑 / 6 人 / 9 人 100BB：尚未接入可复用的完整 GTO 数据。<br>短码推弃不等于 100BB 完整翻前策略。旧教学库仍明确标记为非 GTO。</p></div>
+    <div class="button-row"><button class="outline-button" data-do="export-range">${icon('download')}导出当前范围</button><button class="primary-button" data-do="import-range">${icon('upload')}导入自定义范围</button></div>`;
   } else if (state.modal.type === 'delete') {
     title = '删除这道错题？'; body = '<p>删除后无法撤销，累计答题统计会保留。</p><div class="button-row"><button class="outline-button" data-do="close-modal">保留错题</button><button class="danger-button" data-do="confirm-delete">删除错题</button></div>';
   }
   return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><h2 id="modal-title">${title}</h2><button class="icon-button" data-do="close-modal" aria-label="关闭弹窗">${icon('close')}</button></div>${body}</section></div>`;
 }
+function scopeNotice() {
+  const p = activeProfile();
+  return `<div class="scope-notice ${p.provenance ? 'public-scope' : ''}"><div><strong>${p.provenance ? '单挑短码推弃 · ' + p.stack + 'BB' : p.id === BASE_PROFILE.id ? '100BB 教学近似，非 GTO' : '用户导入范围'}</strong><span>${p.provenance ? '公开近似 Nash 图表 · 仅全下 / 弃牌；不适用于 100BB 完整翻前。' : p.id === BASE_PROFILE.id ? '单挑、6 人、9 人 100BB 暂无可复用的完整 GTO 数据。' : '导入只验证格式，求解来源与精度未独立核验。'}</span></div><button class="text-button" data-do="${p.provenance ? 'method' : 'public-mode'}">${p.provenance ? '来源与精度' : '体验公开推弃训练'}</button></div>`;
+}
 function render() {
   const title = state.page === 'train' ? '每一次选择，都是优势。' : state.page === 'range' ? '看见范围，理解决策。' : '复盘，是进步的开始。';
-  $('#app').innerHTML = `${header()}${state.warning ? `<div class="storage-warning" role="alert">${esc(state.warning)}<button data-do="backup-raw">导出原始备份</button>${!state.saveEnabled ? '<button data-do="enable-save">启用新记录保存</button>' : ''}</div>` : ''}<div class="app-layout">${config()}<main><div class="page-heading"><div><span class="eyebrow">${state.page === 'train' ? 'YOUR DAILY EDGE' : state.page === 'range' ? 'BUILD YOUR INTUITION' : 'TURN MISTAKES INTO PROGRESS'}</span><h1>${title}</h1><p>${state.page === 'train' ? '从翻前开始，让每一手牌都有依据。' : state.page === 'range' ? '把零散的手牌，连成完整的策略。' : '找到反复出现的偏差，逐个掌握。'}</p></div><div class="mode-badge"><span>♠</span> ${profile().id === BASE_PROFILE.id ? '基础训练' : '自定义范围'}</div></div>${statStrip()}${state.page === 'train' ? trainer() : state.page === 'range' ? rangeView() : notebook()}<footer><span>PREFLOP LAB <i> / </i> 先思考，再行动。</span><button data-do="method">${profile().id === BASE_PROFILE.id ? '教学近似范围 · 100BB · 无前注' : '自定义范围 · 100BB · 无前注'}</button></footer></main></div>${modal()}<input type="file" id="range-upload" accept="application/json,.json" hidden>`;
+  $('#app').innerHTML = `${header()}${state.warning ? `<div class="storage-warning" role="alert">${esc(state.warning)}<button data-do="backup-raw">导出原始备份</button>${!state.saveEnabled ? '<button data-do="enable-save">启用新记录保存</button>' : ''}</div>` : ''}<div class="app-layout">${config()}<main><div class="page-heading"><div><span class="eyebrow">${state.page === 'train' ? 'YOUR DAILY EDGE' : state.page === 'range' ? 'BUILD YOUR INTUITION' : 'TURN MISTAKES INTO PROGRESS'}</span><h1>${title}</h1><p>${state.page === 'train' ? '从翻前开始，让每一手牌都有依据。' : state.page === 'range' ? '把零散的手牌，连成完整的策略。' : '找到反复出现的偏差，逐个掌握。'}</p></div><div class="mode-badge"><span>♠</span> ${profileLabel(activeProfile())}</div></div>${statStrip()}${scopeNotice()}${state.page === 'train' ? trainer() : state.page === 'range' ? rangeView() : notebook()}<footer><span>PREFLOP LAB <i> / </i> 先思考，再行动。</span><button data-do="method">${profileLabel(activeProfile())} · ${activeProfile().stack}BB · 无前注</button></footer></main></div>${modal()}<input type="file" id="range-upload" accept="application/json,.json" hidden>`;
   if (state.modal) $('.modal button')?.focus();
 }
 function download(data, name) {
@@ -214,7 +228,8 @@ document.addEventListener('click', event => {
     case 'end-review': state.review = null; state.page = 'mistakes'; state.question = null; render(); break;
     case 'delete-mistake': state.modal = { type: 'delete', key: d.key }; render(); break;
     case 'confirm-delete': state.progress.mistakes = state.progress.mistakes.filter(m => m.key !== state.modal.key); state.modal = null; persist(); render(); break;
-    case 'reset-filters': state.settings = { table: 6, scene: 'rfi', position: 'random', profileId: BASE_PROFILE.id }; state.review = null; persist(); newQuestion(); break;
+    case 'public-mode': state.settings = { table: 2, scene: 'rfi', position: 'random', profileId: DEFAULT_PUBLIC_PROFILE.id }; state.review = null; state.modal = null; persist(); newQuestion(); break;
+    case 'reset-filters': state.settings = { table: state.settings.table, scene: 'rfi', position: 'random', profileId: BASE_PROFILE.id }; state.review = null; persist(); newQuestion(); break;
     case 'backup-raw': try { download(local.getItem(STORAGE_KEY) || '{}', 'preflop-raw-backup.json'); } catch { toast('浏览器不允许读取本地记录'); } break;
     case 'enable-save': state.saveEnabled = true; state.warning = ''; persist(); render(); break;
   }
@@ -235,7 +250,9 @@ document.addEventListener('change', async event => {
   }
   const key = el.dataset.setting; if (!key) return;
   if (key === 'notebookTable') { state.notebookTable = el.value; render(); return; }
-  state.settings[key] = el.value; state.review = null; normalizePosition(); persist(); newQuestion();
+  state.settings[key] = el.value;
+  if (key === 'profileId' && isPushFold(profile())) { state.settings.table = 2; state.settings.position = 'random'; }
+  state.review = null; normalizePosition(); persist(); newQuestion();
 });
 document.addEventListener('keydown', event => {
   if (state.modal) {

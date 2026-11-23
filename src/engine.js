@@ -1,4 +1,5 @@
-// These are authored teaching ranges, not a solver output or a GTO database.
+import { PUBLIC_PROFILES } from './public-ranges.js';
+// Legacy 100BB ranges below are authored teaching ranges, not solver output.
 export const RANKS = 'AKQJT98765432'.split('');
 export const POSITIONS = {
   2: ['SB', 'BB'],
@@ -9,7 +10,7 @@ export const HANDS = RANKS.flatMap((a, i) => RANKS.map((b, j) => i === j ? a + b
 export const ACTIONS = ['fold', 'call', 'raise'];
 export const COMBOS = hand => hand.length === 2 ? 6 : hand.endsWith('s') ? 4 : 12;
 export const BASE_PROFILE = {
-  id: 'teaching-v1', name: '基础教学范围', source: '手工编写 · 非求解器输出',
+  id: 'teaching-v1', name: '100BB 教学（非 GTO）', source: '手工编写 · 非求解器输出',
   stack: 100, ante: 0, rake: '未建模',
   description: '100BB、无前注的教学近似策略。常规开池 2.5BB，小盲开池 3BB，单挑小盲 2.5BB；有位置 3-bet 到 8BB，无位置到 10BB。没有计算均衡、EV 或抽水影响。',
 };
@@ -68,12 +69,15 @@ export function allScenarios() {
   ]));
 }
 
-export function openSize(s) { return s.opener === 'SB' || (s.scene === 'rfi' && s.hero === 'SB') ? (s.table === 2 ? 2.5 : 3) : 2.5; }
-export function raiseSize(s) { return s.scene === 'rfi' ? openSize(s) : (['SB', 'BB'].includes(s.hero) && s.opener !== 'SB' ? 10 : 8); }
-export function callAmount(s) { return s.scene === 'rfi' ? 0.5 : openSize(s) - (s.hero === 'BB' ? 1 : s.hero === 'SB' ? 0.5 : 0); }
-export function potSize(s) { return s.scene === 'rfi' ? 1.5 : 1.5 + openSize(s) - (s.opener === 'SB' ? 0.5 : 0); }
+export const isPushFold = s => s?.rules === 'hu-pushfold-v1';
+export const builtinProfile = id => id === BASE_PROFILE.id ? BASE_PROFILE : PUBLIC_PROFILES.find(p => p.id === id);
+export function openSize(s) { if (isPushFold(s)) return s.stack; return s.opener === 'SB' || (s.scene === 'rfi' && s.hero === 'SB') ? (s.table === 2 ? 2.5 : 3) : 2.5; }
+export function raiseSize(s) { if (isPushFold(s)) return s.stack; return s.scene === 'rfi' ? openSize(s) : (['SB', 'BB'].includes(s.hero) && s.opener !== 'SB' ? 10 : 8); }
+export function callAmount(s) { if (isPushFold(s)) return s.scene === 'defend' ? s.stack - 1 : 0; return s.scene === 'rfi' ? 0.5 : openSize(s) - (s.hero === 'BB' ? 1 : s.hero === 'SB' ? 0.5 : 0); }
+export function potSize(s) { if (isPushFold(s)) return s.scene === 'rfi' ? 1.5 : s.stack + 1; return s.scene === 'rfi' ? 1.5 : 1.5 + openSize(s) - (s.opener === 'SB' ? 0.5 : 0); }
 
 export function frequencies(s, hand, profile = BASE_PROFILE) {
+  if (isPushFold(profile) && (!isPushFold(s) || s.stack !== profile.stack)) throw new Error('推弃筹码或规则与范围版本不匹配');
   if (profile.spots) {
     const spot = profile.spots.find(p => scenarioKey(p) === scenarioKey(s));
     if (!spot) throw new Error('所选范围库不包含这个场景');
@@ -126,9 +130,10 @@ export function makeQuestion(settings, profile = BASE_PROFILE, random = Math.ran
   const spots = availableScenarios(settings, profile);
   if (!spots.length) return null;
   const s = spots[Math.floor(random() * spots.length)], hand = sampleHand(random);
-  return { table: s.table, scene: s.scene, hero: s.hero, opener: s.opener, hand, cards: dealCards(hand, random), profileId: profile.id };
+  return { table: s.table, scene: s.scene, hero: s.hero, opener: s.opener, hand, cards: dealCards(hand, random), profileId: profile.id, stack: profile.stack, rules: profile.rules || 'standard-v1' };
 }
-export function canCall(s) { return s.scene === 'defend' || s.hero === 'SB'; }
+export function canCall(s) { return isPushFold(s) ? s.scene === 'defend' : s.scene === 'defend' || s.hero === 'SB'; }
+export function canRaise(s) { return !isPushFold(s) || s.scene === 'rfi'; }
 export function grade(freq, action) {
   if (!ACTIONS.includes(action)) throw new Error('未知行动');
   const best = ACTIONS.reduce((a, b) => freq[a] >= freq[b] ? a : b);
@@ -163,12 +168,16 @@ export function validateProfile(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('范围文件必须是 JSON 对象');
   if (input.format !== 'preflop-lab-v1') throw new Error('文件格式应为 preflop-lab-v1，请先导出模板');
   if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 80) throw new Error('范围库名称应为 1–80 个字符');
-  if (input.stack !== 100 || input.ante !== 0) throw new Error('当前仅支持 100BB、无前注的范围库');
-  if (input.sizing !== 'standard-v1') throw new Error('下注尺度必须为 standard-v1（详见导出模板）');
+  const pushFold = input.sizing === 'hu-pushfold-v1';
+  if (pushFold && (input.ante !== 0 || !Number.isFinite(input.stack) || input.stack < 2 || input.stack > 20)) throw new Error('推弃范围只支持 2–20BB、无前注');
+  if (!pushFold && (input.stack !== 100 || input.ante !== 0)) throw new Error('当前仅支持 100BB、无前注的范围库');
+  if (!pushFold && input.sizing !== 'standard-v1') throw new Error('下注尺度必须为 standard-v1（详见导出模板）');
   if (!Array.isArray(input.spots) || !input.spots.length || input.spots.length > 100) throw new Error('请提供 1–100 个场景');
   const legal = new Set(allScenarios().map(scenarioKey)), seen = new Set();
   const spots = input.spots.map(s => {
     if (!s || !legal.has(scenarioKey(s)) || typeof s.table !== 'number' || (s.scene === 'rfi' && s.opener !== null)) throw new Error('包含非法桌型、位置或前序行动');
+    if (pushFold && s.table !== 2) throw new Error('推弃模式只支持单挑');
+    const scenario = { ...s, rules: pushFold ? 'hu-pushfold-v1' : 'standard-v1', stack: input.stack };
     const key = scenarioKey(s);
     if (seen.has(key)) throw new Error(`重复场景：${key}`);
     seen.add(key);
@@ -178,18 +187,20 @@ export function validateProfile(input) {
       const f = s.ranges[h];
       if (!f || ACTIONS.some(a => typeof f[a] !== 'number' || !Number.isFinite(f[a]) || f[a] < 0 || f[a] > 100)) throw new Error(`${key} / ${h} 的频率须为 0–100 的数字`);
       if (Math.abs(ACTIONS.reduce((n, a) => n + f[a], 0) - 100) > 0.001) throw new Error(`${key} / ${h} 的行动频率之和必须为 100`);
-      if (!canCall(s) && f.call !== 0) throw new Error(`${key} 不支持 open limp，请将 call 设为 0`);
+      if (!canRaise(scenario) && f.raise !== 0) throw new Error(`${key} 面对全下不能再次加注`);
+      if (!canCall(scenario) && f.call !== 0) throw new Error(`${key} 不支持 open limp，请将 call 设为 0`);
       ranges[h] = Object.fromEntries(ACTIONS.map(a => [a, f[a]]));
     }
-    return { table: s.table, scene: s.scene, hero: s.hero, opener: s.opener, ranges };
+    return { table: s.table, scene: s.scene, hero: s.hero, opener: s.opener, stack: input.stack, rules: scenario.rules, ranges };
   });
-  return { name: input.name.trim(), stack: 100, ante: 0, rake: String(input.rake || '用户未注明').slice(0, 100), source: String(input.source || '用户导入 · 未验证求解来源').slice(0, 180), description: String(input.description || '用户自定义范围，使用前请确认来源与参数。').slice(0, 500), spots };
+  return { name: input.name.trim(), ...(input.representation === 'binary-chart' ? { representation: 'binary-chart' } : {}), stack: input.stack, ante: 0, rules: pushFold ? 'hu-pushfold-v1' : 'standard-v1', rake: String(input.rake || '用户未注明').slice(0, 100), source: String(input.source || '用户导入 · 未验证求解来源').slice(0, 180), description: String(input.description || '用户自定义范围，使用前请确认来源与参数。').slice(0, 500), spots };
 }
 export function exportProfile(profile = BASE_PROFILE) {
-  return { format: 'preflop-lab-v1', name: profile.name, source: profile.source, description: profile.description, stack: 100, ante: 0, rake: profile.rake, sizing: 'standard-v1', sizingNote: 'RFI 2.5BB / SB 3BB / HU SB 2.5BB; 3bet IP 8BB / OOP 10BB; BB vs SB 8BB. call means limp for SB RFI.', spots: (profile.spots || allScenarios()).map(s => ({ table: s.table, scene: s.scene, hero: s.hero, opener: s.opener, ranges: Object.fromEntries(HANDS.map(h => [h, frequencies(s, h, profile)])) })) };
+  return { format: 'preflop-lab-v1', name: profile.name, source: profile.source, description: profile.description, ...(profile.provenance ? { provenance: profile.provenance, representation: profile.representation } : {}), stack: profile.stack, ante: 0, rake: profile.rake, sizing: profile.rules || 'standard-v1', sizingNote: isPushFold(profile) ? 'HU only, SB jam/fold; BB call/fold. Equal starting stacks including blinds SB 0.5BB / BB 1BB; chipEV, no ante.' : 'RFI 2.5BB / SB 3BB / HU SB 2.5BB; 3bet IP 8BB / OOP 10BB; BB vs SB 8BB. call means limp for SB RFI.', spots: (profile.spots || allScenarios()).map(s => ({ table: s.table, scene: s.scene, hero: s.hero, opener: s.opener, ranges: Object.fromEntries(HANDS.map(h => [h, frequencies(s, h, profile)])) })) };
 }
 
 export function explanation(q) {
+  if (isPushFold(q)) return `这是 ${q.stack}BB 单挑推弃模型，只允许 SB 全下或弃牌、BB 跟全下或弃牌。${q.scene === 'rfi' ? 'SB 已投入 0.5BB；全下会投入余下的 ' + (q.stack - 0.5) + 'BB。' : 'BB 已投入 1BB；跟注还需 ' + (q.stack - 1) + 'BB。'}判断对手范围与摊牌权益，并在 SB 位考虑对手弃牌带来的收益。这里不包含 limp、小额开池、ICM 或翻后策略。`;
   const position = q.table === 2 ? '单挑中小盲同时是按钮位，翻前先行动，翻后有位置。' : ['UTG', 'UTG+1', 'UTG+2', 'LJ'].includes(q.hero) ? '前位身后仍有多名玩家，需要更谨慎地选择入池手牌。' : q.hero === 'BTN' ? '按钮位翻后有位置优势，可以用更宽的范围争夺盲注。' : q.hero === 'BB' ? '大盲已投入 1BB，跟注成本更低，但要考虑翻后的位置劣势。' : q.hero === 'SB' ? '小盲翻后通常没有位置，应谨慎处理容易被支配的手牌。' : '越接近按钮位，身后玩家越少，通常可以逐步扩大入池范围。';
   const hand = q.hand.length === 2 ? '口袋对子有成套潜力；小对子仍需结合位置与对手范围选择行动。' : q.hand.endsWith('s') ? '同花手牌具有更好的可玩性，但同花本身并不保证可以盈利入池。' : '非同花手牌更依赖高张强度，弱踢脚容易受到更好手牌的压制。';
   return `${position}${hand}`;
