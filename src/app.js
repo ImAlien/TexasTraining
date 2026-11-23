@@ -76,7 +76,7 @@ function header() {
   const s = stats();
   return `<header class="topbar"><a class="brand" href="#" data-do="nav" data-page="train" aria-label="Preflop Lab 训练室"><span class="brand-mark">♠</span><span>PREFLOP<span class="brand-light"> LAB</span><small>把好决策，练成直觉。</small></span></a>
     <nav aria-label="主要导航">${[['train', 'train', '训练室'], ['range', 'grid', '范围库'], ['mistakes', 'book', '错题本']].map(([page, glyph, label]) => `<button class="nav-item ${state.page === page ? 'active' : ''}" data-do="nav" data-page="${page}" ${state.page === page ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span>${page === 'mistakes' && s.wrong ? `<span class="nav-count">${s.wrong}</span>` : ''}</button>`).join('')}</nav>
-    <button class="help-button" data-do="help">${icon('info')}<span>训练指南</span></button></header>`;
+    <button class="help-button" data-do="help" aria-label="训练指南">${icon('info')}<span>训练指南</span></button></header>`;
 }
 function config() {
   const p = profile(), options = availableScenarios({ ...state.settings, position: 'random' }, p);
